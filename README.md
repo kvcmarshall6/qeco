@@ -1,6 +1,6 @@
 ## Quantum-enhanced Markov chain Monte Carlo for combinatorial optimization
 
-This repo accompanies the publication `Quantum-enhanced Markov chain Monte Carlo (QeMCMC) for combinatorial optimization`. We include all necessary code to replicate the `117` node Maximum Independent Set (MIS) results. 
+This repo accompanies the publication `Quantum-enhanced Markov chain Monte Carlo (QeMCMC) for combinatorial optimization`. We include all necessary code to replicate the `117` node Maximum Independent Set (MIS) results, which finds the MIS for the graph consisting of a fully connected component of `110` nodes and `7` isolated nodes. We also include the `110` node variant of the same problem, for those interested in the filtered graph with isolated nodes removed. 
 
 ### Description
 

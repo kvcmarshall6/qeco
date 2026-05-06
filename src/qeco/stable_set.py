@@ -7,6 +7,7 @@
 """Functions for working with stable set problems."""
 
 import networkx as nx
+import numba as nb
 import numpy as np
 from qiskit import QuantumCircuit, transpile
 from qiskit.circuit import Parameter, ParameterVector
@@ -49,7 +50,9 @@ def soften_bitstring(bitstring, epsilon=0.01):
 def construct_init_state(circuit, input_bitstring):
     """Create warm-start initial state based on softened bitstring approximation."""
     num_qubits = circuit["circuit_to_sample"].num_qubits
-    assert len(input_bitstring) == num_qubits, "Bitstring length must match number of qubits."
+    assert (
+        len(input_bitstring) == num_qubits
+    ), "Bitstring length must match number of qubits."
 
     init_state = QuantumCircuit(num_qubits)
 
@@ -79,7 +82,9 @@ def construct_init_state_params(circuit):
 def construct_mixer(circuit, input_bitstring):
     """Construct warm-start mixer layer based on softened input bitstring."""
     num_qubits = circuit["circuit_to_sample"].num_qubits
-    assert len(input_bitstring) == num_qubits, "Bitstring length must match number of qubits."
+    assert (
+        len(input_bitstring) == num_qubits
+    ), "Bitstring length must match number of qubits."
 
     mixer_layer = QuantumCircuit(num_qubits)
     beta = Parameter("β")
@@ -124,7 +129,9 @@ def construct_warm_start_circuit(
     my_properties = {}
 
     construction_pass = QAOAConstructionPass(layers, init_state, mixer_layer)
-    construction_pass.property_set = my_properties  # merge back-in the permutation.
+    construction_pass.property_set = (
+        my_properties  # merge back-in the permutation.
+    )
     transpiled_circ = dag_to_circuit(
         construction_pass.run(circuit_to_dag(old_circuits_dict["cost_circuit"]))
     )
@@ -151,7 +158,14 @@ def construct_warm_start_circuit(
 
 # NOTE: this function has been borrowed from stable_set_benchmarking repo
 def circuit_construction(
-    singles, doubles, params, backend, swap_strat, edge_coloring, layers, metadata=None
+    singles,
+    doubles,
+    params,
+    backend,
+    swap_strat,
+    edge_coloring,
+    layers,
+    metadata=None,
 ):
     """Construct circuits."""
     circuits_dict = dict()
@@ -171,7 +185,9 @@ def circuit_construction(
     my_properties = {}  # We will need this later on.
 
     def get_permutation(pass_, dag, time, property_set, count):
-        my_properties["virtual_permutation_layout"] = property_set["virtual_permutation_layout"]
+        my_properties["virtual_permutation_layout"] = property_set[
+            "virtual_permutation_layout"
+        ]
 
     config = {
         "num_layers": layers,
@@ -195,8 +211,12 @@ def circuit_construction(
 
     # Finally, construct the full QAOA circuit.
     construction_pass = QAOAConstructionPass(layers)
-    construction_pass.property_set = my_properties  # merge back-in the permutation.
-    transpiled_circ = dag_to_circuit(construction_pass.run(circuit_to_dag(cost_circ)))
+    construction_pass.property_set = (
+        my_properties  # merge back-in the permutation.
+    )
+    transpiled_circ = dag_to_circuit(
+        construction_pass.run(circuit_to_dag(cost_circ))
+    )
 
     circ_to_sample = transpiled_circ.assign_parameters(params, inplace=False)
 
@@ -252,11 +272,61 @@ def stable_set_value(x, g, penalty=1.1, maximality_penalty=2.0):
     return obj
 
 
+def stable_set_value_parallel(
+    x_matrix,
+    indptr,
+    indices,
+    edge_u,
+    edge_v,
+    penalty=1.1,
+    maximality_penalty=2.0,
+):
+    """Compute stable set energies for many bitstrings in parallel."""
+    n_samples, n_nodes = x_matrix.shape
+    energies = np.empty(n_samples, dtype=np.float64)
+
+    for s in nb.prange(n_samples):
+        x = x_matrix[s]
+        obj = 0.0
+
+        # -sum(x)
+        for i in range(n_nodes):
+            obj -= x[i]
+
+        # violated edges
+        violations = 0
+        for e in range(len(edge_u)):
+            u = edge_u[e]
+            v = edge_v[e]
+            if x[u] == 1 and x[v] == 1:
+                violations += 1
+        obj += penalty * violations
+
+        # non-maximality
+        non_maximal = 0
+        for i in range(n_nodes):
+            if x[i] == 0:
+                can_add = 1
+                for k in range(indptr[i], indptr[i + 1]):
+                    j = indices[k]
+                    if x[j] == 1:
+                        can_add = 0
+                        break
+                non_maximal += can_add
+
+        obj += maximality_penalty * non_maximal
+        energies[s] = obj
+
+    return energies
+
+
 def run_experiment(circuit, shots=1, backend=None, session=None):
     """Run experiment."""
     if backend is None:
         backend = StatevectorSampler()
-        result = backend.run([circuit["circuit_to_sample"]], shots=shots).result()
+        result = backend.run(
+            [circuit["circuit_to_sample"]], shots=shots
+        ).result()
         counts = result[0].data.c.get_counts()
     else:
         sampler = Sampler(mode=session)

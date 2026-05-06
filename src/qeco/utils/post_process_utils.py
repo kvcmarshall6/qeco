@@ -7,13 +7,18 @@
 
 """Post-processing utilities."""
 
+import math
 from collections import defaultdict
 from typing import Literal
 
 import networkx as nx
 import numpy as np
 
-from qeco.stable_set import compute_violations, stable_set_value
+from qeco.stable_set import (
+    compute_violations,
+    stable_set_value,
+    stable_set_value_parallel,
+)
 
 
 # NOTE: this function has been borrowed from stable_set_benchmarking repo
@@ -57,7 +62,9 @@ def greedy_post_process(
                     test_sample = [val for val in new_sample]
                     test_sample[node] = 1
 
-                    num_violations = sum(compute_violations(test_sample, graph).values())
+                    num_violations = sum(
+                        compute_violations(test_sample, graph).values()
+                    )
 
                     if num_violations == 0:
                         new_sample[node] = 1
@@ -113,25 +120,81 @@ def to_cdf(dist_cut: dict):
     return values, cdf
 
 
-def compute_best_solution(proposed_solutions, graph, penalty):
-    """Evaluate lowest energy solution from all proposals."""
-    best_solution = None
-    best_E_out = float("inf")
-    for proposal, _ in proposed_solutions.items():
-        proposed_s_array = np.array([int(bit) for bit in proposal])
-        E_out = stable_set_value(proposed_s_array[::-1], graph, penalty)
+def sample_good_solution(
+    proposed_solutions,
+    graph,
+    penalty=1.1,
+    maximality_penalty=2.0,
+    filter=0.01,  # noqa: A002
+):
+    """Evaluate lowest energy solutions (best 1%) from all proposals then randomly sample one of these."""
+    if len(proposed_solutions) == 0:
+        return {}, None
 
-        if E_out < best_E_out:
-            best_E_out = E_out
-            best_solution = proposal
+    nodes = list(graph.nodes())
+    node_to_idx = {n: i for i, n in enumerate(nodes)}
+    n_nodes = len(nodes)
 
-    print(
-        "Best proposed solution: ",
-        "".join(map(str, best_solution)),
-        "E_out: ",
-        best_E_out,
+    edge_u = []
+    edge_v = []
+    adjacency_lists = [[] for _ in range(n_nodes)]
+
+    for u, v in graph.edges():
+        iu = node_to_idx[u]
+        iv = node_to_idx[v]
+
+        edge_u.append(iu)
+        edge_v.append(iv)
+
+        adjacency_lists[iu].append(iv)
+        adjacency_lists[iv].append(iu)
+
+    edge_u = np.array(edge_u, dtype=np.int64)
+    edge_v = np.array(edge_v, dtype=np.int64)
+
+    indptr = np.zeros(n_nodes + 1, dtype=np.int64)
+    total_nbrs = sum(len(nbrs) for nbrs in adjacency_lists)
+    indices = np.empty(total_nbrs, dtype=np.int64)
+
+    pos = 0
+    for i in range(n_nodes):
+        indptr[i] = pos
+        nbrs = adjacency_lists[i]
+        indices[pos : pos + len(nbrs)] = nbrs
+        pos += len(nbrs)
+    indptr[n_nodes] = pos
+
+    proposals = list(proposed_solutions.keys())
+    counts = np.array(list(proposed_solutions.values()), dtype=np.int64)
+
+    n_samples = len(proposals)
+    bit_matrix = np.empty((n_samples, n_nodes), dtype=np.int8)
+
+    for i, proposal in enumerate(proposals):
+        arr = np.fromiter(
+            (1 if b == "1" else 0 for b in proposal), dtype=np.int8
+        )
+        bit_matrix[i] = arr[::-1]  # little endian
+
+    # compute energies
+    energies = stable_set_value_parallel(
+        bit_matrix,
+        indptr,
+        indices,
+        edge_u,
+        edge_v,
+        penalty=penalty,
+        maximality_penalty=maximality_penalty,
     )
-    return {best_solution: int(proposed_solutions[best_solution])}, best_E_out
+
+    # apply filter
+    k = max(1, math.ceil(filter * n_samples))
+    threshold = np.partition(energies, k - 1)[k - 1]
+    candidates = np.where(energies <= threshold)[0]
+
+    idx = np.random.choice(candidates)
+
+    return {proposals[idx]: int(counts[idx])}, float(energies[idx])
 
 
 def run_metropolis_hastings(
@@ -151,7 +214,9 @@ def run_metropolis_hastings(
         for bs, c in proposal_distribution.items():
             bitstring_freqs[bs] += c
 
-    accepted_solution_arr = np.array([int(b) for b in accepted_solution_str[::-1]])
+    accepted_solution_arr = np.array(
+        [int(b) for b in accepted_solution_str[::-1]]
+    )
     accepted_solution_E = stable_set_value(accepted_solution_arr, graph)
 
     # compute proposal energies and acceptance probabilities
@@ -174,7 +239,9 @@ def run_metropolis_hastings(
     if T <= 0:
         accept = delta_E <= 0  # greedy at T=0
     else:
-        accept = True if delta_E <= 0 else np.random.rand() < np.exp(-delta_E / T)
+        accept = (
+            True if delta_E <= 0 else np.random.rand() < np.exp(-delta_E / T)
+        )
 
     # if T > 0:
     #     A = np.minimum(1.0, np.exp(-delta_E / T))
